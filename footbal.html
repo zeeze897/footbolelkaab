@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>الكعب Sport</title>
+    <!-- تضمين Tailwind CSS من CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* الأنماط المخصصة للخط والخلفية */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-image: url('https://images.unsplash.com/photo-1508090714771-464a35f5c00e?q=80&w=2940&auto=format&fit=crop&ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D'); /* صورة ملعب كبير */
+            background-size: cover; /* تغطية كاملة للخلفية */
+            background-position: center center; /* توسيط الصورة */
+            background-attachment: fixed; /* تثبيت الخلفية عند التمرير */
+            @apply bg-gray-100 text-gray-800; /* تطبيق ألوان خلفية ونص افتراضية من Tailwind */
+        }
+
+        /* طبقة تعتيم على الخلفية لتحسين قراءة المحتوى */
+        .overlay-container {
+            @apply bg-white bg-opacity-90; /* خلفية بيضاء شبه شفافة */
+            min-height: 100vh; /* تأكد أن الخلفية تمتد لأسفل الصفحة */
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-start;
+            align-items: center;
+        }
+
+        /* Modal specific styles */
+        #preferences-modal {
+            background-color: rgba(0, 0, 0, 0.75); /* Darker overlay for modal */
+        }
+    </style>
+</head>
+<body class="p-4 md:p-8">
+    <div class="overlay-container container mx-auto max-w-2xl shadow-lg rounded-xl p-6 sm:p-8">
+        <h1 class="text-3xl md:text-4xl font-extrabold text-center text-blue-700 mb-8 rounded-lg py-2">
+            الكعب Sport
+        </h1>
+
+        <!-- حقول البحث عن المباريات والدوريات والتاريخ -->
+        <div class="flex flex-col sm:flex-row gap-4 mb-6 w-full">
+            <input type="text" id="search-input" placeholder="البحث عن فريق أو دوري..."
+                   class="flex-grow p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition duration-200 text-right" />
+            <input type="date" id="date-input"
+                   class="p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition duration-200" />
+        </div>
+
+        <div id="loading" class="text-center text-lg text-gray-600 font-semibold hidden mb-4">
+            جاري تحميل المباريات...
+        </div>
+
+        <div id="matches-container" class="space-y-6 w-full">
+            <!-- هنا سيتم عرض أقسام المباريات (الدوريات الكبرى ثم الأخرى) -->
+        </div>
+
+        <div id="error-message" class="text-center text-red-600 text-lg font-semibold hidden mt-4">
+            حدث خطأ أثناء تحميل المباريات. يرجى المحاولة مرة أخرى لاحقًا.
+        </div>
+    </div>
+
+    <script>
+        // Function to convert Base64 to ArrayBuffer (for TTS, if used later)
+        function base64ToArrayBuffer(base64) {
+            const binaryString = window.atob(base64);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes.buffer;
+        }
+
+        // Function to convert PCM to WAV (for TTS, if used later)
+        function pcmToWav(pcmData, sampleRate) {
+            const pcm16 = pcmData; // Data is Int16Array
+            const dataLength = pcm16.length * 2; // 2 bytes per sample (PCM16)
+            const buffer = new ArrayBuffer(44 + dataLength);
+            const view = new DataView(buffer);
+
+            // WAV header
+            // RIFF chunk
+            writeString(view, 0, 'RIFF');
+            view.setUint32(4, 36 + dataLength, true); // ChunkSize
+            writeString(view, 8, 'WAVE');
+            // FMT chunk
+            writeString(view, 12, 'fmt ');
+            view.setUint32(16, 16, true); // Subchunk1Size (16 for PCM)
+            view.setUint16(20, 1, true); // AudioFormat (1 for PCM)
+            view.setUint16(22, 1, true); // NumChannels (Mono)
+            view.setUint32(24, sampleRate, true); // SampleRate
+            view.setUint32(28, sampleRate * 2, true); // ByteRate (SampleRate * NumChannels * BitsPerSample/8)
+            view.setUint16(32, 2, true); // BlockAlign (NumChannels * BitsPerSample/8)
+            view.setUint16(34, 16, true); // BitsPerSample
+            // DATA chunk
+            writeString(view, 36, 'data');
+            view.setUint32(40, dataLength, true); // Subchunk2Size
+
+            // Write PCM data
+            let offset = 44;
+            for (let i = 0; i < pcm16.length; i++, offset += 2) {
+                view.setInt16(offset, pcm16[i], true);
+            }
+
+            return new Blob([buffer], { type: 'audio/wav' });
+        }
+
+        function writeString(view, offset, string) {
+            for (let i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        }
+
+
+        // DOM elements
+        const loadingDiv = document.getElementById('loading');
+        const matchesContainer = document.getElementById('matches-container');
+        const errorDiv = document.getElementById('error-message');
+        const searchInput = document.getElementById('search-input');
+        const dateInput = document.getElementById('date-input');
+
+        // **********************************************
+        // ************** API-Football Setup **************
+        // **********************************************
+        const API_KEY = '8e263faefb711b174b7cb25bb8302bf4';
+        const BASE_URL = 'https://v3.football.api-sports.io/';
+
+        // List of major leagues for sorting
+        // Ensure these names exactly match the names returned by API-Football
+        const MAJOR_LEAGUES = [
+            'Premier League',   // English Premier League
+            'La Liga',          // Spanish La Liga
+            'Serie A',          // Italian Serie A
+            'Ligue 1',          // French Ligue 1
+            'Primeira Liga'     // Portuguese Primeira Liga
+            // Other leagues were removed as per your request
+        ];
+
+        // Function to fetch matches
+        async function fetchMatches(selectedDate = null, searchTerm = null) {
+            console.log(`Fetching matches for date: ${selectedDate}, search term: ${searchTerm}`);
+            loadingDiv.classList.remove('hidden');
+            matchesContainer.innerHTML = '';
+            errorDiv.classList.add('hidden');
+
+            const dateToFetch = selectedDate || formatDate(new Date());
+            const url = `${BASE_URL}fixtures?date=${dateToFetch}`;
+
+            try {
+                const response = await fetchWithRetry(url, {
+                    method: 'GET',
+                    headers: {
+                        'x-apisports-key': API_KEY,
+                    },
+                });
+
+                const data = await response.json();
+
+                // START: Error Handling for API Rate Limit
+                if (data.errors && data.errors.requests) {
+                    console.error('API Error: Daily Request Limit Reached:', data.errors.requests);
+                    errorDiv.textContent = 'لقد وصلت إلى حد الطلبات اليومي للـ API. يرجى التحقق من خطتك على لوحة تحكم api-football.com أو المحاولة مرة أخرى غدًا.';
+                    errorDiv.classList.remove('hidden');
+                    return;
+                }
+                // END: Error Handling for API Rate Limit
+
+                if (data.errors && Object.keys(data.errors).length > 0) {
+                    console.error('API Error:', data.errors);
+                    errorDiv.classList.remove('hidden');
+                    return;
+                }
+
+                if (data.response && data.response.length > 0) {
+                    let filteredMatches = data.response;
+
+                    if (searchTerm) {
+                        const lowerCaseSearchTerm = searchTerm.toLowerCase();
+                        filteredMatches = filteredMatches.filter(match =>
+                            match.teams.home.name.toLowerCase().includes(lowerCaseSearchTerm) ||
+                            match.teams.away.name.toLowerCase().includes(lowerCaseSearchTerm) ||
+                            match.league.name.toLowerCase().includes(lowerCaseSearchTerm)
+                        );
+                    }
+
+                    // Sort matches: Major leagues first, then other leagues, then by time
+                    const sortedMatches = filteredMatches.sort((a, b) => {
+                        const aIsMajor = MAJOR_LEAGUES.includes(a.league.name);
+                        const bIsMajor = MAJOR_LEAGUES.includes(b.league.name);
+
+                        // Major leagues come first
+                        if (aIsMajor && !bIsMajor) {
+                            return -1;
+                        }
+                        if (!aIsMajor && bIsMajor) {
+                            return 1;
+                        }
+                        // If leagues are in the same category (major or not), sort by time
+                        return new Date(a.fixture.date) - new Date(b.fixture.date);
+                    });
+
+                    displayMatchesByLeague(sortedMatches); // Call the new function to display by league
+                } else {
+                    matchesContainer.innerHTML = '<p class="text-center text-gray-500 text-lg">لا توجد مباريات مقررة لهذا اليوم أو لا توجد نتائج للبحث.</p>';
+                }
+
+            } catch (error) {
+                console.error('Fetch Error:', error);
+                errorDiv.textContent = 'حدث خطأ أثناء تحميل المباريات. يرجى التحقق من اتصال الإنترنت والمحاولة مرة أخرى.';
+                errorDiv.classList.remove('hidden');
+            } finally {
+                loadingDiv.classList.add('hidden');
+            }
+        }
+
+        // Function to apply Exponential Backoff for API requests
+        async function fetchWithRetry(url, options, retries = 3, delay = 1000) {
+            for (let i = 0; i < retries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (response.ok) {
+                        return response;
+                    } else if (response.status === 429) {
+                        console.warn(`Too many requests (HTTP 429), retrying in ${delay / 1000}s...`);
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        delay *= 2;
+                    } else {
+                        // For other non-OK HTTP statuses, throw error immediately
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                } catch (error) {
+                    // Only retry for network errors or 429 status (handled above)
+                    // For other errors, re-throw after last retry
+                    if (i < retries - 1 && (error instanceof TypeError || error.message.includes('Failed to fetch'))) {
+                        console.warn(`Fetch failed, retrying in ${delay / 1000}s...`, error);
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        delay *= 2;
+                    } else {
+                        throw error;
+                    }
+                }
+            }
+        }
+
+        // Function to display matches grouped by league
+        function displayMatchesByLeague(matches) {
+            matchesContainer.innerHTML = ''; // Clear any previous matches
+
+            const majorLeaguesMatches = {};
+            const otherMatches = [];
+
+            // Group matches by major and other leagues
+            matches.forEach(match => {
+                const leagueName = match.league.name;
+                if (MAJOR_LEAGUES.includes(leagueName)) {
+                    if (!majorLeaguesMatches[leagueName]) {
+                        majorLeaguesMatches[leagueName] = [];
+                    }
+                    majorLeaguesMatches[leagueName].push(match);
+                } else {
+                    otherMatches.push(match);
+                }
+            });
+
+            // Display major league matches in the order defined in MAJOR_LEAGUES
+            MAJOR_LEAGUES.forEach(leagueName => {
+                if (majorLeaguesMatches[leagueName] && majorLeaguesMatches[leagueName].length > 0) {
+                    const leagueSection = document.createElement('div');
+                    leagueSection.className = 'league-section mb-6 p-4 bg-gray-50 rounded-lg shadow-sm';
+
+                    // Get league logo from the first match in this league
+                    const leagueLogo = majorLeaguesMatches[leagueName][0].league.logo || 'https://placehold.co/24x24/cccccc/000000?text=L';
+
+                    leagueSection.innerHTML = `
+                        <h2 class="text-xl font-bold text-blue-800 mb-4 flex items-center justify-center">
+                            <img src="${leagueLogo}" alt="${leagueName} Logo" onerror="this.onerror=null;this.src='https://placehold.co/20x20/cccccc/000000?text=L';" class="w-6 h-6 rounded-full object-contain ml-2">
+                            ${leagueName}
+                        </h2>
+                        <div class="space-y-4"></div> <!-- Container for match cards -->
+                    `;
+                    const leagueMatchesDiv = leagueSection.querySelector('.space-y-4');
+
+                    majorLeaguesMatches[leagueName].forEach(match => {
+                        const matchCard = createMatchCard(match);
+                        leagueMatchesDiv.appendChild(matchCard);
+                    });
+                    matchesContainer.appendChild(leagueSection);
+                }
+            });
+
+            // Display other league matches
+            if (otherMatches.length > 0) {
+                const otherLeaguesSection = document.createElement('div');
+                otherLeaguesSection.className = 'league-section mb-6 p-4 bg-gray-50 rounded-lg shadow-sm';
+                otherLeaguesSection.innerHTML = `
+                    <h2 class="text-xl font-bold text-gray-700 mb-4 text-center">دوريات أخرى</h2>
+                    <div class="space-y-4"></div>
+                `;
+                const otherMatchesDiv = otherLeaguesSection.querySelector('.space-y-4');
+
+                otherMatches.sort((a, b) => new Date(a.fixture.date) - new Date(b.fixture.date)).forEach(match => {
+                    const matchCard = createMatchCard(match);
+                    otherMatchesDiv.appendChild(matchCard);
+                });
+                matchesContainer.appendChild(otherLeaguesSection);
+            }
+        }
+
+
+        // Function to create a single match card
+        function createMatchCard(match) {
+            const homeTeamName = match.teams.home.name;
+            const awayTeamName = match.teams.away.name;
+            const homeTeamLogo = match.teams.home.logo || 'https://placehold.co/40x40/cccccc/000000?text=NoLogo';
+            const awayTeamLogo = match.teams.away.logo || 'https://placehold.co/40x40/cccccc/000000?text=NoLogo';
+            const fixtureStatus = match.fixture.status.long;
+            const eventDate = new Date(match.fixture.date);
+
+            // Format time to English (Latin) numbers
+            const matchTime = eventDate.toLocaleTimeString('en-US', {
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: false
+            });
+
+            // Format date (day of week, month, day)
+            const matchDate = eventDate.toLocaleDateString('ar-EG', { // Still Arabic for date part as per previous requests
+                weekday: 'short',
+                month: 'numeric',
+                day: 'numeric'
+            });
+
+            const scoreHome = match.goals.home !== null ? match.goals.home : '-';
+            const scoreAway = match.goals.away !== null ? match.goals.away : '-';
+
+            const leagueName = match.league.name;
+            const countryName = match.league.country;
+            const leagueLogo = match.league.logo || 'https://placehold.co/24x24/cccccc/000000?text=L';
+
+            const isMajorLeague = MAJOR_LEAGUES.includes(leagueName);
+            const leagueNameClass = isMajorLeague ? 'text-blue-700 font-bold' : 'text-gray-500';
+
+            const matchCard = document.createElement('div');
+            matchCard.className = 'match-card bg-white p-4 rounded-lg shadow-md flex flex-col items-center border border-gray-200 transition-transform duration-200 hover:scale-105';
+
+            matchCard.innerHTML = `
+                <div class="w-full text-center text-sm mb-2 flex items-center justify-center">
+                    <img src="${leagueLogo}" alt="${leagueName} Logo" onerror="this.onerror=null;this.src='https://placehold.co/20x20/cccccc/000000?text=L';" class="w-5 h-5 rounded-full object-contain ml-1">
+                    <span class="${leagueNameClass}">${leagueName}</span> ${countryName ? ` - <span class="${leagueNameClass}">${countryName}</span>` : ''}
+                </div>
+                <div class="flex items-center justify-between w-full">
+                    <!-- Home Team Info -->
+                    <div class="flex flex-col items-center w-1/3">
+                        <img src="${homeTeamLogo}" alt="${homeTeamName} Logo" onerror="this.onerror=null;this.src='https://placehold.co/40x40/cccccc/000000?text=Logo';" class="w-10 h-10 rounded-full mb-1 object-contain">
+                        <p class="font-bold text-sm text-center">${homeTeamName}</p>
+                    </div>
+
+                    <!-- Score and Time/Status -->
+                    <div class="flex flex-col items-center w-1/3 mx-2">
+                        <p class="text-xl font-extrabold text-blue-700">
+                            ${fixtureStatus.includes('Finished') || fixtureStatus.includes('Half Time') || fixtureStatus.includes('2nd Half') ? `${scoreHome} - ${scoreAway}` : matchTime}
+                        </p>
+                        <p class="text-xs text-gray-500 mt-1">${fixtureStatus}</p>
+                        ${fixtureStatus.includes('Not Started') ? `<p class="text-xs text-gray-500">${matchDate}</p>` : ''}
+                    </div>
+
+                    <!-- Away Team Info -->
+                    <div class="flex flex-col items-center w-1/3">
+                        <img src="${awayTeamLogo}" alt="${awayTeamName} Logo" onerror="this.onerror=null;this.src='https://placehold.co/40x40/cccccc/000000?text=Logo';" class="w-10 h-10 rounded-full mb-1 object-contain">
+                        <p class="font-bold text-sm text-center">${awayTeamName}</p>
+                    </div>
+                </div>
+            `;
+            return matchCard;
+        }
+
+        // Helper function to format the date for input field
+        function formatDate(date) {
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            return `${year}-${month}-${day}`;
+        }
+
+        // Set default date for the date input field
+        dateInput.value = formatDate(new Date());
+
+        // Add event listeners for search input and date input
+        let searchTimeout;
+        searchInput.addEventListener('input', () => {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(() => {
+                const selectedDate = dateInput.value;
+                const searchTerm = searchInput.value.trim();
+                fetchMatches(selectedDate, searchTerm);
+            }, 500);
+        });
+
+        dateInput.addEventListener('change', () => {
+            const selectedDate = dateInput.value;
+            const searchTerm = searchInput.value.trim();
+            fetchMatches(selectedDate, searchTerm);
+        });
+
+        // Fetch matches when the page loads
+        window.onload = () => {
+            fetchMatches(dateInput.value);
+        };
+    </script>
+</body>
+</html>
